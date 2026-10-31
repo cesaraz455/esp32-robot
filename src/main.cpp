@@ -53,6 +53,15 @@
 #define VELOCIDAD_BASE      200
 #define INTERVALO_ENVIO_MS  800  // periodo de envio de distancias a la ESP32-CAM
 
+// Ajuste del mando
+#define ZONA_MUERTA_AVANCE 30   // stick izq. (de 255)
+#define ZONA_MUERTA_GIRO   50   // stick der.: mayor para ignorar la deriva
+#define GIRO_PORCENTAJE    50   // 100 = giro original, menor = giro mas suave
+// Compensacion de motores desiguales (%). Si el robot se desvia a la derecha al
+// ir de frente, el motor derecho gira menos: bajar CORRECCION_IZQ (ej. 95).
+#define CORRECCION_IZQ     100
+#define CORRECCION_DER     100
+
 Adafruit_VL53L0X lox_frontal = Adafruit_VL53L0X();
 Adafruit_VL53L0X lox_izq     = Adafruit_VL53L0X();
 Adafruit_VL53L0X lox_der     = Adafruit_VL53L0X();
@@ -116,11 +125,33 @@ void controlDiferencial(int axisY, int axisRX) {
   int v = map(axisY, -512, 512, 255, -255);
   int w = map(axisRX, -512, 512, -255, 255);
 
-  if (abs(v) < 30) v = 0;
-  if (abs(w) < 30) w = 0;
+  if (abs(v) < ZONA_MUERTA_AVANCE) v = 0;
+
+  // Giro: zona muerta mayor (absorbe la deriva del stick) y reescalado para que
+  // el giro arranque suave desde 0 justo al salir de la zona muerta.
+  if (abs(w) < ZONA_MUERTA_GIRO) {
+    w = 0;
+  } else {
+    int signo = (w > 0) ? 1 : -1;
+    w = signo * (abs(w) - ZONA_MUERTA_GIRO) * 255 / (255 - ZONA_MUERTA_GIRO);
+  }
+  // Menor sensibilidad de giro
+  w = w * GIRO_PORCENTAJE / 100;
 
   int izq = v + w;
   int der = v - w;
+
+  // Si una rueda se pasa de 255, se escalan las dos por igual: el recorte
+  // por separado reducia el giro justo a maxima velocidad.
+  int maximo = max(abs(izq), abs(der));
+  if (maximo > 255) {
+    izq = izq * 255 / maximo;
+    der = der * 255 / maximo;
+  }
+
+  // Compensacion de diferencia entre motores (100 = sin correccion)
+  izq = izq * CORRECCION_IZQ / 100;
+  der = der * CORRECCION_DER / 100;
 
   setMotorIzquierdo(izq);
   setMotorDerecho(der);
