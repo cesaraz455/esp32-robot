@@ -22,7 +22,7 @@ src/main.cpp     - todo el firmware (pines, motores, sensores, mando, UART)
 
 | Función | GPIO |
 |---|---|
-| I2C SDA / SCL | 7 / 15 (ver aviso abajo) |
+| I2C SDA / SCL | 7 / 15 |
 | XSHUT frontal / izq / der | 5 / 6 / 4 |
 | UART cámara RX / TX (`Serial1`) | 17 / 18, 115200 8N1 |
 | LED frontal (rojo) / izq (amarillo) / der (verde) | 8 / 9 / 10 |
@@ -35,12 +35,10 @@ src/main.cpp     - todo el firmware (pines, motores, sensores, mando, UART)
 - PWM por LEDC: 5 kHz, 8 bits, canales 0 (A) y 1 (B).
 - Pines prohibidos en el S3 N16R8: 35, 36, 37 (PSRAM octal), 0/3/45/46 (arranque), 19/20 (USB), 43/44 (UART0). Libres: 11, 12, 13, 14, 16.
 
-### ⚠ Discrepancia pendiente
+### Fuente de verdad
 
-`auxi/CLAUDE.md` (Sección 6.1) dice **SDA = GPIO15 y SCL = GPIO7** (`Wire.begin(15, 7)`),
-pero `main.cpp` define `SDA_PIN 7` y `SCL_PIN 15`. El resto de pines coincide con la PCB.
-Confirmar cuál es correcto con el hardware real antes de dar por buena la PCB; no cambiar sin avisar,
-porque el comentario del código dice que esa asignación es la que ya funcionó.
+Este código es la fuente de verdad de los pines. SDA = GPIO7 y SCL = GPIO15 (`Wire.begin(7, 15)`).
+`../auxi` (esquemático y PCB) todavía tiene SDA/SCL invertidos; está anotado como pendiente en la Sección 20 de su `CLAUDE.md`. No cambiar los pines aquí para igualar la PCB.
 
 ## Comportamiento
 
