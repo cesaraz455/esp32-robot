@@ -16,8 +16,11 @@
 #define XSHUT_DER     4
 
 // Comunicación UART con ESP32-CAM (RX=17, TX=18)
-#define RX_CAM_PIN 17
-#define TX_CAM_PIN 18
+// UART con la camara por la linea GPIO17 (pin 10 de J1) <-> IO14 de la camara (net UART_CAM_TO_ESP
+// de la PCB), usada aqui en sentido ESP -> CAM: TX = GPIO17. GPIO18 (-> IO13) queda sin usar. RX apunta a GPIO16 (libre, sin conectar): no se reciben comandos
+// de la camara por ahora. No usar -1: el core lo cambia a los pines por defecto (15/16 en el S3).
+#define RX_CAM_PIN 16
+#define TX_CAM_PIN 17
 
 // LEDs Indicadores
 #define LED_FRONTAL 8   // LED Rojo
@@ -48,6 +51,7 @@
 
 #define UMBRAL_DISTANCIA_MM 150  // 15 cm
 #define VELOCIDAD_BASE      200
+#define INTERVALO_ENVIO_MS  800  // periodo de envio de distancias a la ESP32-CAM
 
 Adafruit_VL53L0X lox_frontal = Adafruit_VL53L0X();
 Adafruit_VL53L0X lox_izq     = Adafruit_VL53L0X();
@@ -284,6 +288,16 @@ void loop() {
     else if (comando == "S" || comando == "PARAR") {
       pararMotores();
     }
+  }
+
+  // 4. Enviar distancias a la ESP32-CAM cada INTERVALO_ENVIO_MS: "D,frente,izq,der\n" (mm, -1 = sin lectura)
+  static unsigned long ultimoEnvio = 0;
+  if (millis() - ultimoEnvio >= INTERVALO_ENVIO_MS) {
+    ultimoEnvio = millis();
+    int dF = (mFront.RangeStatus != 4) ? mFront.RangeMilliMeter : -1;
+    int dI = (mLeft.RangeStatus  != 4) ? mLeft.RangeMilliMeter  : -1;
+    int dD = (mRight.RangeStatus != 4) ? mRight.RangeMilliMeter : -1;
+    Serial1.printf("D,%d,%d,%d\n", dF, dI, dD);
   }
 
   delay(20);
