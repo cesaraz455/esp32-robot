@@ -62,9 +62,19 @@
 #define CORRECCION_IZQ     100
 #define CORRECCION_DER     100
 
+// Depuracion por serie (115200). Poner en 0 para quitar todos los prints.
+#define DEBUG_SERIAL 1
+#define DEBUG_INTERVALO_MS 250
+
 Adafruit_VL53L0X lox_frontal = Adafruit_VL53L0X();
 Adafruit_VL53L0X lox_izq     = Adafruit_VL53L0X();
 Adafruit_VL53L0X lox_der     = Adafruit_VL53L0X();
+
+// Estado de los sensores. Si un sensor no responde al arrancar (ok = false) nunca
+// se vuelve a leer por I2C, asi el programa funciona igual sin sensores.
+// Distancias en mm; -1 = sin lectura valida (sensor ausente o fuera de rango).
+bool okFrontal = false, okIzq = false, okDer = false;
+int  distFrontal = -1, distIzq = -1, distDer = -1;
 
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 
@@ -153,8 +163,53 @@ void controlDiferencial(int axisY, int axisRX) {
   izq = izq * CORRECCION_IZQ / 100;
   der = der * CORRECCION_DER / 100;
 
+#if DEBUG_SERIAL
+  static unsigned long ultimoDebug = 0;
+  if (millis() - ultimoDebug >= DEBUG_INTERVALO_MS) {
+    ultimoDebug = millis();
+    Serial.printf("[MANDO] axisY=%d axisRX=%d | v=%d w=%d | MotorIzq=%d MotorDer=%d\n",
+                  axisY, axisRX, v, w, izq, der);
+  }
+#endif
+
   setMotorIzquierdo(izq);
   setMotorDerecho(der);
+}
+
+// ==========================================
+// 3b. SENSORES VL53L0X (medicion continua, sin bloqueo)
+// ==========================================
+// Enciende el sensor (XSHUT), le asigna su direccion I2C y lo deja midiendo solo
+// cada 50 ms. Devuelve false si no responde (p. ej. no esta conectado).
+bool iniciarSensor(Adafruit_VL53L0X &lox, uint8_t addr, uint8_t xshut, const char *nombre) {
+  digitalWrite(xshut, HIGH);
+  delay(30);
+  if (!lox.begin(addr)) {
+    Serial.printf("[ERROR] Sensor %s no responde\n", nombre);
+    return false;
+  }
+  lox.setMeasurementTimingBudgetMicroSeconds(33000);
+  lox.startRangeContinuous(50);
+  Serial.printf("[OK] Sensor %s en 0x%02X (medicion continua)\n", nombre, addr);
+  return true;
+}
+
+// Consulta si el sensor ya tiene una medicion nueva y, si es asi, la guarda en mm.
+// No espera: si no hay dato nuevo conserva el ultimo valor y sale al instante.
+// Un sensor que no inicializo no se toca (cero trafico I2C).
+void actualizarSensor(Adafruit_VL53L0X &lox, bool ok, int &mm) {
+  if (!ok) {
+    mm = -1;
+    return;
+  }
+  if (lox.isRangeComplete()) {
+    uint16_t r = lox.readRangeResult();  // 0xFFFF = fuera de rango / error
+    mm = (r == 0xFFFF) ? -1 : (int)r;
+  }
+}
+
+bool hayObstaculo(int mm) {
+  return mm > 0 && mm <= UMBRAL_DISTANCIA_MM;
 }
 
 // ==========================================
@@ -230,35 +285,10 @@ void setup() {
   Wire.setClock(100000); // 100 kHz para estabilidad con Bluetooth
   delay(50);
 
-  // Sensor Frontal
-  digitalWrite(XSHUT_FRONTAL, HIGH);
-  delay(30);
-  if (lox_frontal.begin(ADDR_FRONTAL)) {
-    Serial.println("[OK] Sensor Frontal en 0x30");
-    lox_frontal.setMeasurementTimingBudgetMicroSeconds(33000);
-  } else {
-    Serial.println("[ERROR] Sensor Frontal no responde");
-  }
-
-  // Sensor Izquierdo
-  digitalWrite(XSHUT_IZQ, HIGH);
-  delay(30);
-  if (lox_izq.begin(ADDR_IZQ)) {
-    Serial.println("[OK] Sensor Izquierdo en 0x31");
-    lox_izq.setMeasurementTimingBudgetMicroSeconds(33000);
-  } else {
-    Serial.println("[ERROR] Sensor Izquierdo no responde");
-  }
-
-  // Sensor Derecho
-  digitalWrite(XSHUT_DER, HIGH);
-  delay(30);
-  if (lox_der.begin(ADDR_DER)) {
-    Serial.println("[OK] Sensor Derecho en 0x32");
-    lox_der.setMeasurementTimingBudgetMicroSeconds(33000);
-  } else {
-    Serial.println("[ERROR] Sensor Derecho no responde");
-  }
+  // Sensores: uno a uno (cada uno toma su direccion al encenderse)
+  okFrontal = iniciarSensor(lox_frontal, ADDR_FRONTAL, XSHUT_FRONTAL, "Frontal");
+  okIzq     = iniciarSensor(lox_izq,     ADDR_IZQ,     XSHUT_IZQ,     "Izquierdo");
+  okDer     = iniciarSensor(lox_der,     ADDR_DER,     XSHUT_DER,     "Derecho");
 
   // 5. Inicializar servicio Bluetooth Bluepad32
   BP32.setup(&onConnectedController, &onDisconnectedController);
@@ -267,21 +297,24 @@ void setup() {
 }
 
 void loop() {
-  // 1. Lectura de Sensores VL53L0X
-  VL53L0X_RangingMeasurementData_t mFront, mLeft, mRight;
-  lox_frontal.rangingTest(&mFront, false);
-  lox_izq.rangingTest(&mLeft, false);
-  lox_der.rangingTest(&mRight, false);
+#if DEBUG_SERIAL
+  // Duracion de la vuelta anterior del loop (debe ser ~20 ms)
+  static unsigned long tAnterior = 0;
+  unsigned long duracionLoop = millis() - tAnterior;
+  tAnterior = millis();
+#endif
+  // 1. Sensores VL53L0X: solo se recoge la ultima medicion (no bloquea)
+  actualizarSensor(lox_frontal, okFrontal, distFrontal);
+  actualizarSensor(lox_izq,     okIzq,     distIzq);
+  actualizarSensor(lox_der,     okDer,     distDer);
 
   // EVALUACIÓN Y CONTROL DE LEDS
-  bool frontDetectado = (mFront.RangeStatus != 4) && (mFront.RangeMilliMeter > 0) && (mFront.RangeMilliMeter <= UMBRAL_DISTANCIA_MM);
+  bool frontDetectado = hayObstaculo(distFrontal);
+  bool izqDetectado   = hayObstaculo(distIzq);
+  bool derDetectado   = hayObstaculo(distDer);
   digitalWrite(LED_FRONTAL, frontDetectado ? HIGH : LOW);
-
-  bool izqDetectado = (mLeft.RangeStatus != 4) && (mLeft.RangeMilliMeter > 0) && (mLeft.RangeMilliMeter <= UMBRAL_DISTANCIA_MM);
-  digitalWrite(LED_IZQ, izqDetectado ? HIGH : LOW);
-
-  bool derDetectado = (mRight.RangeStatus != 4) && (mRight.RangeMilliMeter > 0) && (mRight.RangeMilliMeter <= UMBRAL_DISTANCIA_MM);
-  digitalWrite(LED_DER, derDetectado ? HIGH : LOW);
+  digitalWrite(LED_IZQ,     izqDetectado   ? HIGH : LOW);
+  digitalWrite(LED_DER,     derDetectado   ? HIGH : LOW);
 
   // 2. Procesar Mando Bluetooth (Bluepad32)
   BP32.update();
@@ -325,11 +358,19 @@ void loop() {
   static unsigned long ultimoEnvio = 0;
   if (millis() - ultimoEnvio >= INTERVALO_ENVIO_MS) {
     ultimoEnvio = millis();
-    int dF = (mFront.RangeStatus != 4) ? mFront.RangeMilliMeter : -1;
-    int dI = (mLeft.RangeStatus  != 4) ? mLeft.RangeMilliMeter  : -1;
-    int dD = (mRight.RangeStatus != 4) ? mRight.RangeMilliMeter : -1;
-    Serial1.printf("D,%d,%d,%d\n", dF, dI, dD);
+    Serial1.printf("D,%d,%d,%d\n", distFrontal, distIzq, distDer);
   }
+
+#if DEBUG_SERIAL
+  static unsigned long ultimoDebugSensores = 0;
+  if (millis() - ultimoDebugSensores >= DEBUG_INTERVALO_MS) {
+    ultimoDebugSensores = millis();
+    Serial.printf("[SENS] F: ok=%d mm=%d | I: ok=%d mm=%d | D: ok=%d mm=%d | LEDs F=%d I=%d D=%d | loop=%lums mando=%d\n",
+                  okFrontal, distFrontal, okIzq, distIzq, okDer, distDer,
+                  frontDetectado, izqDetectado, derDetectado,
+                  duracionLoop, mandoConectado);
+  }
+#endif
 
   delay(20);
 }

@@ -48,11 +48,71 @@ Este código es la fuente de verdad de los pines. SDA = GPIO7 y SCL = GPIO15 (`W
 - Los LED de proximidad no frenan los motores; solo indican obstáculo. (Reglas de la universidad: los LED deben ser visibles.)
 - Al arrancar: autotest de LED (500 ms), motores parados, sensores inicializados uno a uno.
 
+## Flujo de ejecución
+
+Todo está en `src/main.cpp`: `setup()` corre una vez al encender y `loop()` se repite (~20 ms por vuelta).
+
+### `setup()` (una sola vez)
+
+1. Abre `Serial` (depuración) y `Serial1` (UART hacia la ESP32-CAM, 115200).
+2. Autotest de LED: los 3 se encienden 500 ms.
+3. Inicia motores (PWM + TB6612) y los deja **parados**.
+4. Apaga los 3 sensores (XSHUT en LOW) y abre el bus I2C.
+5. Enciende los sensores **uno a uno** (los tres nacen con la misma dirección I2C; así cada uno recibe la suya: frontal `0x30`, izq. `0x31`, der. `0x32`). Si responde, queda midiendo solo en modo continuo y se marca `ok`; si no, imprime `[ERROR]` y se marca no-ok, pero el programa sigue.
+6. Inicia Bluetooth (Bluepad32).
+
+### `loop()` (cada vuelta)
+
+1. **Sensores (sin bloqueo):** por cada sensor `ok`, si hay una medición nueva se guarda en mm (`-1` si está fuera de rango); si no, se conserva la última. Un sensor no-ok no se toca (distancia siempre `-1`, cero tráfico I2C).
+2. **LED de proximidad:** distancia entre 1 y 150 mm enciende el LED de ese lado; `-1` lo apaga.
+3. **Mando Xbox:** `BP32.update()`; si hay mando conectado, sus sticks mueven los motores (`controlDiferencial`).
+4. **Comandos UART de la cámara:** solo si no hay mando conectado.
+5. **Envío a la cámara:** cada 800 ms, `D,frente,izq,der\n`.
+6. `delay(20)` y vuelta al paso 1.
+
+### `controlDiferencial(axisY, axisRX)`
+
+1. `v` = stick izq. vertical → -255…255 (invertido a propósito). Si `|v| < 30` → 0.
+2. `w` = stick der. horizontal → -255…255. Zona muerta de 50 con reescalado, y luego × `GIRO_PORCENTAJE` (50 %).
+3. `izq = v + w`, `der = v - w`. Si alguno pasa de 255, se escalan los dos por igual.
+4. Se aplica `CORRECCION_IZQ/DER` y se envía a cada motor.
+
+| Sticks | Resultado |
+|---|---|
+| Izq. adelante, der. al centro | Ambas ruedas adelante |
+| Izq. al centro, der. a la derecha | Giro en el sitio (izq. avanza, der. retrocede) |
+| Izq. adelante + der. a un lado | Avanza en curva |
+| Ambos al centro | Motores parados |
+
+### Sin sensores conectados
+
+Los sensores **no frenan ni limitan los motores**: solo LED y datos a la cámara. Sin ellos el robot se maneja igual: salen tres `[ERROR]` al arrancar, el `loop()` sigue en ~20 ms, los LED quedan apagados y la cámara recibe `D,-1,-1,-1`. El arranque sí tarda ~2.7 s por los intentos de `begin()`.
+
+## Depuración por serie
+
+En el entorno normal `Serial` sale por UART0 (GPIO43/44), no por el USB. Para verlo por el cable USB hay un entorno aparte, `debug` (activa `ARDUINO_USB_MODE=1` y `ARDUINO_USB_CDC_ON_BOOT=1`):
+
+```
+pio run -e debug -t upload
+pio device monitor -e debug
+```
+
+Con `DEBUG_SERIAL = 1` en `main.cpp` se imprime cada 250 ms:
+
+```
+[MANDO] axisY=.. axisRX=.. | v=.. w=.. | MotorIzq=.. MotorDer=..
+[SENS]  F: ok=.. mm=.. | I: ok=.. mm=.. | D: ok=.. mm=.. | LEDs ... | loop=..ms mando=..
+```
+
+- `[MANDO]` sirve para validar el mapeo de los sticks **sin batería**: nada se mueve, pero se ve lo que recibiría cada motor.
+- `[SENS]` muestra qué sensores respondieron, su distancia y la duración del `loop()` (`loop=20ms` es lo normal).
+- Los errores `Wire.cpp ... i2cRead returned Error -1` aparecen solo al arrancar, durante `begin()` de sensores ausentes.
+
 ## Notas técnicas y trampas
 
 - Se usa la API `ledcSetup`/`ledcAttachPin` del Arduino core **2.x**. Bluepad32 va sobre ese core; si se migra a core 3.x hay que cambiar a `ledcAttach`/`ledcWrite(pin, ...)`.
 - `platformio.ini` usa `espressif32@6.10.0` y reemplaza el framework por el Arduino-ESP32 con Bluepad32 de `maxgerhardt/pio-framework-bluepad32` (`platform_packages`). Compila (verificado con PlatformIO 6.2). No se ha probado en hardware.
-- `BP32.update()` y las lecturas `rangingTest` están en el mismo `loop()` con `delay(20)`; lecturas bloqueantes pueden hacer lenta la respuesta del mando.
+- Los VL53L0X trabajan en **modo continuo** (`startRangeContinuous(50)`): el `loop()` solo pregunta `isRangeComplete()` y guarda el último valor, sin esperar. Un sensor que no inicializa (`okFrontal/okIzq/okDer = false`) no se vuelve a consultar. Antes se usaba `rangingTest` (bloqueante): sin sensores cada vuelta tardaba ~3.7 s y el mando quedaba inutilizable, y las mediciones quedaban sin inicializar.
 - Si el mando se desconecta mientras se mueve, los motores conservan el último valor (no hay parada de seguridad). Candidato a mejora.
 - El stick Y está invertido a propósito en `map(axisY, -512, 512, 255, -255)`.
 - Secretos: este firmware no usa WiFi. Las credenciales WiFi viven solo en `../esp32cam-web/.env`.
@@ -60,7 +120,8 @@ Este código es la fuente de verdad de los pines. SDA = GPIO7 y SCL = GPIO15 (`W
 ## Comandos
 
 ```
-pio run                    # compilar
-pio run -t upload          # subir
-pio device monitor         # serie a 115200
+pio run                    # compilar (firmware normal)
+pio run -t upload          # subir firmware normal (uso del robot)
+pio run -e debug -t upload # subir firmware de depuración (prints por USB)
+pio device monitor -e debug # serie a 115200 (solo útil con el entorno debug)
 ```
