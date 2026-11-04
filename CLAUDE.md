@@ -46,7 +46,9 @@ Este código es la fuente de verdad de los pines. SDA = GPIO7 y SCL = GPIO15 (`W
 - **UART hacia ESP32-CAM**: cada 800 ms (`INTERVALO_ENVIO_MS`) envía por `Serial1` (TX = GPIO17 → IO14 de la cámara; es la línea `UART_CAM_TO_ESP` de la PCB usada en sentido ESP → CAM por decisión del usuario; `UART_ESP_TO_CAM` (GPIO18 → IO13) no se usa) la línea `D,<frente>,<izq>,<der>\n` (mm; -1 = lectura inválida, `RangeStatus == 4`). La cámara la muestra en su página web. Cambiar este formato exige cambiar `esp32cam-web/src/main.cpp`.
 - **UART desde ESP32-CAM**: solo se atiende si no hay mando conectado. Comandos terminados en `\n`, sin distinguir mayúsculas: `F`/`ADELANTE`, `B`/`ATRAS`, `L`/`IZQUIERDA`, `R`/`DERECHA`, `S`/`PARAR`.
 - Los LED de proximidad no frenan los motores; solo indican obstáculo. (Reglas de la universidad: los LED deben ser visibles.)
-- Al arrancar: autotest de LED (500 ms), motores parados, sensores inicializados uno a uno.
+- Al arrancar: autotest de LED (los 3 encendidos 500 ms), motores parados, sensores inicializados uno a uno, y luego otros 500 ms con encendidos solo los LED de los sensores que sí respondieron.
+- Cada sensor es independiente: si uno falla, los demás siguen y el fallido queda en `-1` (LED apagado y `-1` a la cámara).
+- Direcciones I2C únicas: antes de encender cada sensor se comprueba que nadie conteste en 0x29 y que la dirección destino esté libre; después se verifica que el sensor contesta en la suya. Si un sensor falla se vuelve a apagar (XSHUT en bajo) para que no estorbe al siguiente. Si algo contesta en 0x29 con todos los XSHUT en bajo, se imprime `[ERROR] ... un sensor no obedece a su XSHUT` y no se asigna dirección.
 
 ## Flujo de ejecución
 
@@ -55,7 +57,7 @@ Todo está en `src/main.cpp`: `setup()` corre una vez al encender y `loop()` se 
 ### `setup()` (una sola vez)
 
 1. Abre `Serial` (depuración) y `Serial1` (UART hacia la ESP32-CAM, 115200).
-2. Autotest de LED: los 3 se encienden 500 ms.
+2. Autotest de LED: los 3 se encienden 500 ms (después de iniciar los sensores se encienden otros 500 ms solo los de los sensores que funcionan).
 3. Inicia motores (PWM + TB6612) y los deja **parados**.
 4. Apaga los 3 sensores (XSHUT en LOW) y abre el bus I2C.
 5. Enciende los sensores **uno a uno** (los tres nacen con la misma dirección I2C; así cada uno recibe la suya: frontal `0x30`, izq. `0x31`, der. `0x32`). Si responde, queda midiendo solo en modo continuo y se marca `ok`; si no, imprime `[ERROR]` y se marca no-ok, pero el programa sigue.

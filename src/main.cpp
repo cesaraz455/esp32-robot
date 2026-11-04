@@ -179,17 +179,79 @@ void controlDiferencial(int axisY, int axisRX) {
 // ==========================================
 // 3b. SENSORES VL53L0X (medicion continua, sin bloqueo)
 // ==========================================
+// Direccion I2C de fabrica de todos los VL53L0X. La biblioteca siempre habla primero
+// con ella para cambiarla, asi que si DOS sensores estan vivos a la vez en 0x29,
+// el cambio de direccion se aplica a los dos y quedan con la misma direccion.
+#define ADDR_DEFECTO 0x29
+
+// true si algun dispositivo contesta (ACK) en esa direccion.
+bool respondeI2C(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+// Apaga (XSHUT en bajo) todos los sensores que todavia no tienen direccion propia.
+void apagarSensoresPendientes() {
+  if (!okFrontal) digitalWrite(XSHUT_FRONTAL, LOW);
+  if (!okIzq)     digitalWrite(XSHUT_IZQ, LOW);
+  if (!okDer)     digitalWrite(XSHUT_DER, LOW);
+}
+
 // Enciende el sensor (XSHUT), le asigna su direccion I2C y lo deja midiendo solo
 // cada 50 ms. Devuelve false si no responde (p. ej. no esta conectado).
+// Garantia de direcciones independientes: solo se enciende UN sensor cuando nadie
+// mas contesta en 0x29, y si algo falla el sensor se vuelve a apagar para que no
+// estorbe al siguiente.
 bool iniciarSensor(Adafruit_VL53L0X &lox, uint8_t addr, uint8_t xshut, const char *nombre) {
-  digitalWrite(xshut, HIGH);
-  delay(30);
-  if (!lox.begin(addr)) {
-    Serial.printf("[ERROR] Sensor %s no responde\n", nombre);
+  // 1. Antes de encender este sensor, 0x29 debe estar libre. Si alguien contesta,
+  //    algun sensor no obedece a su XSHUT: se intenta apagar y se vuelve a comprobar.
+  if (respondeI2C(ADDR_DEFECTO)) {
+    apagarSensoresPendientes();
+    delay(50);
+    if (respondeI2C(ADDR_DEFECTO)) {
+      Serial.printf("[ERROR] Sensor %s: algo contesta en 0x%02X con los XSHUT en bajo "
+                    "(un sensor no obedece a su XSHUT). No se asigna direccion para evitar duplicados\n",
+                    nombre, ADDR_DEFECTO);
+      return false;
+    }
+  }
+  // 2. La direccion destino no puede estar ya ocupada por otro sensor.
+  if (respondeI2C(addr)) {
+    Serial.printf("[ERROR] Sensor %s: la direccion 0x%02X ya esta ocupada\n", nombre, addr);
     return false;
   }
+
+  // 3. Encender solo este sensor y comprobar que aparece en 0x29.
+  digitalWrite(xshut, HIGH);
+  delay(30);
+  if (!respondeI2C(ADDR_DEFECTO)) {
+    Serial.printf("[ERROR] Sensor %s no responde\n", nombre);
+    digitalWrite(xshut, LOW);
+    return false;
+  }
+
+  // 4. Asignar su direccion y verificar que quedo en la nueva y sale de 0x29.
+  if (!lox.begin(addr)) {
+    Serial.printf("[ERROR] Sensor %s no inicializo\n", nombre);
+    digitalWrite(xshut, LOW);
+    return false;
+  }
+  if (!respondeI2C(addr)) {
+    Serial.printf("[ERROR] Sensor %s no contesta en 0x%02X tras asignarla\n", nombre, addr);
+    digitalWrite(xshut, LOW);
+    return false;
+  }
+  if (respondeI2C(ADDR_DEFECTO)) {
+    Serial.printf("[AVISO] Sensor %s: sigue habiendo algo en 0x%02X tras mover el sensor a 0x%02X\n",
+                  nombre, ADDR_DEFECTO, addr);
+  }
+
   lox.setMeasurementTimingBudgetMicroSeconds(33000);
-  lox.startRangeContinuous(50);
+  if (!lox.startRangeContinuous(50)) {
+    Serial.printf("[ERROR] Sensor %s no pudo iniciar la medicion continua\n", nombre);
+    digitalWrite(xshut, LOW);
+    return false;
+  }
   Serial.printf("[OK] Sensor %s en 0x%02X (medicion continua)\n", nombre, addr);
   return true;
 }
@@ -246,6 +308,10 @@ void onDisconnectedController(ControllerPtr ctl) {
 // ==========================================
 void setup() {
   Serial.begin(115200);
+#if DEBUG_SERIAL && ARDUINO_USB_CDC_ON_BOOT
+  // Con el serial por USB nativo, espera (max. 3 s) a que se abra el monitor para no perder los primeros mensajes
+  { unsigned long t0 = millis(); while (!Serial && millis() - t0 < 3000) delay(10); }
+#endif
   delay(1000);
 
   // Serial1: Comunicación UART con ESP32-CAM
@@ -253,7 +319,9 @@ void setup() {
 
   Serial.println("\n--- INICIALIZANDO SISTEMA COMPLETO ---");
 
-  // 1. Configurar LEDs y autotest al encender
+  // 1. Configurar LEDs y autotest al encender: los 3 LED encendidos 500 ms
+  //    (comprobar que los LED funcionan). Despues, tras iniciar los sensores,
+  //    se encienden 500 ms solo los LED de los sensores que si funcionan.
   pinMode(LED_FRONTAL, OUTPUT);
   pinMode(LED_IZQ, OUTPUT);
   pinMode(LED_DER, OUTPUT);
@@ -261,7 +329,18 @@ void setup() {
   digitalWrite(LED_FRONTAL, HIGH);
   digitalWrite(LED_IZQ, HIGH);
   digitalWrite(LED_DER, HIGH);
+#if DEBUG_SERIAL
+  // Nivel REAL de cada pin (los GPIO son entrada/salida): 1 = el ESP32 esta entregando 3.3 V,
+  // 0 = algo lo esta forzando a GND (corto) aunque el firmware haya puesto HIGH.
+  Serial.printf("[LED-TEST] t=%lums GPIO HIGH -> leido: ROJO(GPIO%d)=%d AMARILLO(GPIO%d)=%d VERDE(GPIO%d)=%d\n",
+                millis(), LED_FRONTAL, digitalRead(LED_FRONTAL), LED_IZQ, digitalRead(LED_IZQ),
+                LED_DER, digitalRead(LED_DER));
+#endif
   delay(500);
+#if DEBUG_SERIAL
+  Serial.printf("[LED-TEST] t=%lums tras 500 ms, aun HIGH: ROJO=%d AMARILLO=%d VERDE=%d\n",
+                millis(), digitalRead(LED_FRONTAL), digitalRead(LED_IZQ), digitalRead(LED_DER));
+#endif
   digitalWrite(LED_FRONTAL, LOW);
   digitalWrite(LED_IZQ, LOW);
   digitalWrite(LED_DER, LOW);
@@ -289,6 +368,20 @@ void setup() {
   okFrontal = iniciarSensor(lox_frontal, ADDR_FRONTAL, XSHUT_FRONTAL, "Frontal");
   okIzq     = iniciarSensor(lox_izq,     ADDR_IZQ,     XSHUT_IZQ,     "Izquierdo");
   okDer     = iniciarSensor(lox_der,     ADDR_DER,     XSHUT_DER,     "Derecho");
+
+  // Cada sensor es independiente: los que fallan quedan apagados (-1 para LED y
+  // camara) y los demas siguen funcionando.
+  Serial.printf("Sensores: Frontal=%s Izquierdo=%s Derecho=%s\n",
+                okFrontal ? "OK" : "FALLA", okIzq ? "OK" : "FALLA", okDer ? "OK" : "FALLA");
+
+  // Segundo autotest: 500 ms con encendidos solo los LED de los sensores que funcionan
+  digitalWrite(LED_FRONTAL, okFrontal ? HIGH : LOW);
+  digitalWrite(LED_IZQ,     okIzq     ? HIGH : LOW);
+  digitalWrite(LED_DER,     okDer     ? HIGH : LOW);
+  delay(500);
+  digitalWrite(LED_FRONTAL, LOW);
+  digitalWrite(LED_IZQ, LOW);
+  digitalWrite(LED_DER, LOW);
 
   // 5. Inicializar servicio Bluetooth Bluepad32
   BP32.setup(&onConnectedController, &onDisconnectedController);
